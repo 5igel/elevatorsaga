@@ -1,3 +1,10 @@
+// Current issues
+// * Elevators donts(or wrong) switch direction
+// * floors are skipping even if they are in same direction
+// * NaN on floor inidcator and elevator hangs up
+// * need to setup tests
+
+
 {
     init: function(elevators, floors) {
         const Directions = {
@@ -16,8 +23,9 @@
             }
         }
 
-        class ElevatorsManager {
+        class ElevatorsManager extends Listeners{
             constructor(elvs) {
+                super(elvs);
                 var small = new SmallElevator(elvs[0], 0);
                 var large = new LargeElevator(elvs[1], 1);
 
@@ -54,6 +62,15 @@
                 this._id = id;
                 this._isBusy = false;
                 this.destinationQueue = this._r.destinationQueue;
+
+                this._r.goingUpIndicator(true);
+                this._r.goingDownIndicator(false);
+
+                // Whenever the elevator is idle (has no more queued destinations) ...
+                this.on("idle", function() {
+                    //this.goToFloor(0);
+                    this.isBusy = false;
+                });
             }
 
             currentFloor() {
@@ -65,7 +82,13 @@
             }
 
             goToFloor(f) {
+                this.setDirectionByDestination(f);
                 this._r.goToFloor(f);
+            }
+
+            setDirectionByDestination(f) {
+                const diff = this._r.currentFloor() - f;
+                this.directionIndicator = diff < 0 ? Directions.UP : Directions.DOWN
             }
 
             init() {
@@ -97,6 +120,7 @@
             }
 
             set directionIndicator(direction) {
+                console.log('direction', direction);
                 this._r.goingUpIndicator(false);
                 this._r.goingDownIndicator(false);
 
@@ -110,20 +134,38 @@
                 }
             }
 
+            mergeUnique(array1, array2) {
+                const newArr1 = this.unique(array1);
+                const newArr2 = this.unique(array2);
+
+                //merge to arrays with unique val's
+                return newArr1.reduce((destinations, item) => {
+                    //search if exeist in queue
+                    if(destinations.indexOf(item) === -1) {
+                        destinations.push(item);
+                    }
+                    return destinations;
+                }, newArr2);
+            }
+
+            unique(arr) {
+                return arr.reduce((destinations, item) => {
+                    //search if exeist in queue
+                    if(destinations.indexOf(item) === -1) {
+                        destinations.push(item);
+                    }
+                    return destinations;
+                }, []);
+            }
+
             goToFloorInOrder(floor) {
                 this.goToFloor(floor);
+
                 const destinationsInEl = this._r.getPressedFloors();
                 const destinationsInQ = this._r.destinationQueue;
 
                 //merge to arrays with unique val's
-                const destinations = destinationsInQ.reduce((destinations, item) => {
-                    //search if exeist in queue
-                    if(destinations.indexOf(item) !== -1) {
-                        destinations.push(item);
-                    }
-                    return destinations;
-                }, destinationsInEl);
-
+                const destinations = this.mergeUnique(destinationsInEl, destinationsInQ);
                 let maintainDirection = false;
 
                 // if there are any other floors in current direction
@@ -158,14 +200,8 @@
 
         class SmallElevator extends AbstractElevator {
             init() {
-                // Whenever the elevator is idle (has no more queued destinations) ...
-                this.on("idle", function() {
-                    //this.goToFloor(0);
-                    this.isBusy = false;
-                });
-
                 this.on("floor_button_pressed", (floor) => {
-                    console.log('going to', floor);
+                    console.log(`{this._id}:: going to ${floor}`);
                     this.isBusy = true;
                         this.goToFloorInOrder(floor);
                 });
@@ -174,15 +210,8 @@
 
         class LargeElevator extends AbstractElevator {
             init() {
-                // Whenever the elevator is idle (has no more queued destinations) ...
-                this.on("idle", function() {
-                    //this.goToFloor(0);
-                    this.isBusy = false;
-                });
-
                 this.on("floor_button_pressed", (floor) => {
                     this.isBusy = true;
-                    console.log(this);
                     console.log(this, `id: ${this._id}, floor: ${this.currentFloor()} load: ${this.loadFactor()}`, this._r.destinationQueue);
                     if(this.currentFloor() === 0) {
                         if(this.loadFactor() > 0.4) {
@@ -196,32 +225,68 @@
             }
         }
 
+        class QueueManager {
+            constructor(elevatorsManager) {
+                this.floorsUp = [];
+                this.floorsDown = [];
+                this.elevatorsManager = elevatorsManager;
+
+                fls.on("up_button_pressed", this.assignOrWait(Directions.UP));
+
+                fls.on("down_button_pressed", this.assignOrWait(Directions.DOWN));
+            }
+
+            assignOrWait(direction) {
+                const self = this;
+                const floorStackName = Directions.UP === direction ? 'floorsUp' : 'floorsDown';
+
+                return function() {
+                    const floorNum = this.floorNum();
+
+                    //try to assign to free or add to Queu
+                    if(!self.assignToFree(floorNum)) {
+                        self[floorStackName].push(floorNum);
+                    }
+                }
+            }
+
+            assignToFree(flr) {
+                const freeElv = this.elevatorsManager.findFree();
+                if(freeElv) freeElv.goToFloor(flr);
+                return freeElv;
+            }
+        }
+
         var elevator = elevators[0]; // Let's use the first elevator
         const elvs = new ElevatorsManager(elevators);
         const fls = new Listeners(floors);
+        const q = new QueueManager(elvs);
 
-        fls.on("up_button_pressed", function() {
-            var el = elvs.findFree();
-            const floorNum = this.floorNum();
-            if(!el) {
-                el = elvs.getClosestTo(floorNum, Directions.UP);
+        // Recalculate list
+        elvs.on("stopped_at_floor", function() {
+            console.log(`${this._id}:: at ${this.currentFloor()}`, this);
+
+            console.log(`${this._id}:: q: ${this._r.destinationQueue}, dif ${this._r.destinationQueue[0] - this.currentFloor()}`)
+
+            // Elevator don't have destination
+            if (this._r.destinationQueue.length === 0) {
+                this._r.goingUpIndicator(true);
+                this._r.goingDownIndicator(true);
+            } else {
+                //pick something new in a way
+                let candidateFloors;
+                if(this.prevDirection === Directions.UP) {
+                    //going up
+                    candidateFloors = q.floorsUp.filter( f => f > this.currentFloor());
+                } else {
+                    //down
+                    candidateFloors = q.floorsUp.filter( f => f < this.currentFloor());
+                }
+
+                //@todo optimize it
+                candidateFloors.forEach( f => this.goToFloorInOrder(elvs));
             }
-
-            el.isBusy = true;
-            el.goToFloor(floorNum);
         });
-
-        fls.on("down_button_pressed", function() {
-            var el = elvs.findFree();
-            const floorNum = this.floorNum();
-            if(!el) {
-                el = elvs.getClosestTo(floorNum, Directions.DOWN);
-            }
-
-            el.isBusy = true;
-            el.goToFloor(floorNum);
-        });
-
     },
     update: function(dt, elevators, floors) {
         // We normally don't need to do anything here
